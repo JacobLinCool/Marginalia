@@ -1,0 +1,24 @@
+name = "marginalia"
+main = "src/worker.ts"
+compatibility_date = "2025-05-26"
+compatibility_flags = ["nodejs_compat"]
+account_id = "b1c3d1b89f9131a84a0f1f6a973232f1"
+
+# D1 database. Run `wrangler d1 create arxiv_rq_claims` and paste the id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "arxiv_rq_claims"
+database_id = "35492cc7-31ae-4714-ad58-b399f57e9a38"
+migrations_dir = "migrations"
+
+# Workflow binding. The class is exported from src/worker.ts.
+[[workflows]]
+name = "extract-paper"
+binding = "EXTRACT_WORKFLOW"
+class_name = "ExtractPaperWorkflow"
+
+[observability]
+enabled = true
+
+# Secrets to set:
+#   pnpm wrangler secret put OPENAI_API_KEY
