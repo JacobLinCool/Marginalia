@@ -1,4 +1,4 @@
-import type { ArxivMetadata } from "./arxiv";
+import type { PaperMetadata } from "./paper";
 
 export const SYSTEM_PROMPT = `You are a rigorous research-paper analyst.
 
@@ -16,11 +16,11 @@ Rules:
 `;
 
 export function buildUserPrompt(
-  metadata: ArxivMetadata,
+  metadata: PaperMetadata,
   paperText: string,
 ): string {
   const metadataJson = JSON.stringify(metadata, null, 2);
-  return `Analyze this arXiv paper.
+  return `Analyze this research paper.
 
 Metadata:
 ${metadataJson}

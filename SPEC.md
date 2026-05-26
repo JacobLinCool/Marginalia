@@ -2,9 +2,9 @@
 
 ## 0. TL;DR
 
-Marginalia accepts a user-submitted arXiv id and reconstructs the paper's research agenda: the questions the paper is trying to answer, the claims the authors make, the evidence the paper provides for those claims, and the risk that a claim exceeds its own support.
+Marginalia accepts a user-submitted arXiv id, DOI, or supported paper URL and reconstructs the paper's research agenda: the questions the paper is trying to answer, the claims the authors make, the evidence the paper provides for those claims, and the risk that a claim exceeds its own support.
 
-The MVP runs as a Cloudflare Worker backed by D1 and Workflows. It uses a text-only extraction path: fetch arXiv metadata, extract text from the PDF, ask the OpenAI Responses API for strict-schema JSON, and persist the resulting analysis.
+The MVP runs as a Cloudflare Worker backed by D1 and Workflows. It uses a text-only extraction path: resolve source metadata, extract text from the PDF, ask the OpenAI Responses API for strict-schema JSON, and persist the resulting analysis.
 
 For deployment values (URL, D1 id, secrets) and setup commands, see the [README](./README.md).
 
@@ -22,7 +22,7 @@ Author framing is treated as evidence to interpret. The output should surface th
 
 ### 1.2 MVP scope
 
-For a single arXiv id submitted by a user, produce structured JSON containing:
+For a single paper identifier submitted by a user, produce structured JSON containing:
 
 1. Real problem framing
 2. Inferred research questions, including questions implicit in the methods and evidence
@@ -49,7 +49,7 @@ The MVP excludes:
 
 ### 2.1 User flow
 
-1. The user opens `/` and enters an arXiv id or URL
+1. The user opens `/` and enters an arXiv id, DOI, or supported paper URL
 2. Cache hit: the Worker redirects to `/papers/:id/view`
 3. Cache miss: the Worker starts a Workflow; the home page polls every 5 seconds and redirects when analysis completes
 4. Permalink: `/papers/:id/view` works as a direct link at any time
@@ -90,8 +90,8 @@ Browser
 
 ExtractPaperWorkflow per paper (5 steps, independently retried)
   1. mark-running     ──► D1
-  2. fetch-metadata   ──► arXiv API ──► D1 upsert papers
-  3. extract-text     ──► arXiv PDF ──► unpdf ──► sha256 ──► D1
+  2. fetch-metadata   ──► resolver (arXiv/Crossref DOI) ──► D1 upsert papers
+  3. extract-text     ──► resolved PDF ──► unpdf ──► sha256 ──► D1
   4. call-llm         ──► OpenAI Responses (json_schema strict)
   5. save-result      ──► D1 extraction_runs.result
 ```
@@ -103,7 +103,10 @@ worker/
   src/
     config.ts                  # PROMPT_VERSION / SCHEMA_VERSION / model defaults
     env.ts                     # Env interface (D1, Workflow, secret)
-    arxiv.ts                   # ArxivMetadata, fetchArxivMetadata, normalize
+    paper.ts                   # source-neutral PaperRef / PaperMetadata types
+    paperRef.ts                # parse arXiv ids, DOIs, DOI URLs, ACM URLs
+    arxiv.ts                   # arXiv resolver metadata mapping
+    resolvers/                 # resolver dispatch + DOI/Crossref support
     pdfText.ts                 # unpdf extract + clean + strip refs + truncate + sha256
     httpRetry.ts               # fetchWithRetry (backoff + Retry-After)
     prompts.ts                 # SYSTEM_PROMPT + buildUserPrompt
@@ -116,6 +119,7 @@ worker/
   migrations/
     0001_init.sql
     0002_unique_inflight.sql
+    0003_generalize_paper_identity.sql
   wrangler.toml
 ```
 
@@ -125,22 +129,28 @@ D1 (SQLite):
 
 ```sql
 CREATE TABLE papers (
-    arxiv_id         TEXT PRIMARY KEY,
-    arxiv_version    TEXT,
+    canonical_id     TEXT PRIMARY KEY,
+    source           TEXT NOT NULL,
+    source_id        TEXT NOT NULL,
+    doi              TEXT,
     title            TEXT,
     abstract         TEXT,
     authors          TEXT,            -- JSON
     categories       TEXT,            -- JSON
     primary_category TEXT,
+    venue            TEXT,
     published_at     TEXT,
     updated_at       TEXT,
+    landing_url      TEXT,
     pdf_url          TEXT,
+    license          TEXT,
+    raw_metadata     TEXT,            -- JSON
     fetched_at       TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE extraction_runs (
     id              TEXT PRIMARY KEY,    -- workflow instance id (== runId)
-    arxiv_id        TEXT NOT NULL,
+    canonical_id    TEXT NOT NULL,
     model           TEXT NOT NULL,
     prompt_version  TEXT NOT NULL,
     schema_version  TEXT NOT NULL,
@@ -157,16 +167,16 @@ CREATE TABLE extraction_runs (
     updated_at      TEXT DEFAULT (datetime('now'))
 );
 
--- Single in-flight run per (arxiv_id, model, prompt, schema). success / failed
+-- Single in-flight run per (canonical_id, model, prompt, schema). success / failed
 -- rows are unconstrained.
 CREATE UNIQUE INDEX idx_runs_one_inflight
-    ON extraction_runs(arxiv_id, model, prompt_version, schema_version)
+    ON extraction_runs(canonical_id, model, prompt_version, schema_version)
     WHERE status IN ('queued', 'running');
 ```
 
 Design decisions relative to the original §4 schema:
 
-* Extracted paper text is discarded after hashing; `extraction_runs.text_sha256` stores the fingerprint used to identify the analyzed input
+* D1 does not store a separate extracted-text blob; `extraction_runs.text_sha256` stores the fingerprint used to identify the analyzed input. Because the current Workflow returns extracted text from the `extract-text` step into the `call-llm` step, Cloudflare Workflow state may retain that extracted text for the lifetime/retention window of the Workflow instance.
 * Result JSON is stored inline on `extraction_runs.result`, matching the one-to-one relationship between a run and its extraction
 * Idempotency uses the partial unique index plus `INSERT ... ON CONFLICT DO NOTHING`, making the claim atomic under concurrent submissions
 
@@ -174,10 +184,12 @@ Design decisions relative to the original §4 schema:
 
 POST `/papers/:id` handles concurrent submissions in this order:
 
-1. Look up the latest `(arxiv_id, model, prompt, schema, status='success')`; when present, return it
-2. Insert an `extraction_runs` row with `status='queued'` using `ON CONFLICT DO NOTHING`
-3. When `meta.changes > 0`, this caller won the claim and creates `EXTRACT_WORKFLOW.create({ id: runId, ... })`
-4. When no row is inserted, another caller already holds the in-flight claim; re-query the latest in-flight row and report that `runId`
+1. Parse the submitted identifier into a source-qualified `canonical_id`
+2. Look up the latest `(canonical_id, model, prompt, schema, status='success')`; when present, return it
+3. Resolve and persist metadata before queueing, so unsupported or missing papers fail synchronously
+4. Insert an `extraction_runs` row with `status='queued'` using `ON CONFLICT DO NOTHING`
+5. When `meta.changes > 0`, this caller won the claim and creates `EXTRACT_WORKFLOW.create({ id: runId, ... })`
+6. When no row is inserted, another caller already holds the in-flight claim; re-query the latest in-flight row and report that `runId`
 
 `runId === workflow instance id`, so a polling client always sees the same id.
 
@@ -197,7 +209,7 @@ The `run()` body is wrapped in `try` / `catch`. Any throwing step marks the row 
 
 ### 3.5 fetchWithRetry
 
-`src/httpRetry.ts` provides the shared retry logic for both the arXiv API and PDF download calls:
+`src/httpRetry.ts` provides the shared retry logic for metadata and PDF download calls:
 
 * `maxAttempts` defaults to 10
 * Base 1 s, exponential backoff to a 30 s cap, ±25% jitter
@@ -215,7 +227,7 @@ Full schema lives in `worker/src/schemas.ts`. Top-level keys:
 * `claims[]` — `claim` / `claim_type` / `made_by_authors` / `support_in_paper` / `strength` / `overclaim_risk` / `evidence[]` / `notes`
 * `overall_assessment` — `summary` / `main_contribution` / `main_weakness` / `author_overclaim_summary`
 
-Before writing to D1, the result is enriched with `_metadata` (ArxivMetadata), `_usage` (OpenAI usage), and `_runId`.
+Before writing to D1, the result is enriched with `_metadata` (PaperMetadata), `_usage` (OpenAI usage), and `_runId`.
 
 ---
 
@@ -240,7 +252,7 @@ The OpenAI Responses API call uses `text.format.type = "json_schema"` with `stri
 * Schema change → bump `SCHEMA_VERSION` → next submit cache-misses and re-runs
 * `DEFAULT_MODEL` change → different models are tracked separately because the model is part of the key
 
-Old rows remain available for history. The next submit under a new key writes a new row, and all `extraction_runs` for a given `arxiv_id` can be queried together.
+Old rows remain available for history. The next submit under a new key writes a new row, and all `extraction_runs` for a given `canonical_id` can be queried together.
 
 ---
 
@@ -248,14 +260,14 @@ Old rows remain available for history. The next submit under a new key writes a 
 
 ### 6.1 Rate limits
 
-* arXiv: `fetchWithRetry` honors 429 + `Retry-After`; with discovery outside MVP scope, traffic is user-paced
+* arXiv/Crossref/PDF sources: `fetchWithRetry` honors 429 + `Retry-After`; with discovery outside MVP scope, traffic is user-paced
 * OpenAI: per-paper Workflow concurrency bounds calls; the current system runs one instance per paper and performs no batching
 
 ### 6.2 Retry policy
 
 | Failure                   | Handling                                  |
 | ------------------------- | ----------------------------------------- |
-| arXiv 429 / 5xx           | `fetchWithRetry` × 10                     |
+| Metadata 429 / 5xx        | `fetchWithRetry`                          |
 | PDF download 429 / 5xx    | `fetchWithRetry` × 10                     |
 | OpenAI call timeout / 5xx | Workflow step retry × 2 (exp backoff)     |
 | Workflow step exception   | `run()` catch → mark row `failed`         |
@@ -299,7 +311,7 @@ Use `satori` to SSR a per-paper card (title + summary + badge), upgrading `twitt
 
 ### 7.4 Re-extraction backfill
 
-Today, a version bump triggers re-extraction when a user re-submits. A backfill Workflow over `pending_arxiv_ids` could re-run the entire corpus after prompt, schema, or model changes.
+Today, a version bump triggers re-extraction when a user re-submits. A backfill Workflow over pending `canonical_id` values could re-run the entire corpus after prompt, schema, or model changes.
 
 ### 7.5 PDF figure / table understanding
 

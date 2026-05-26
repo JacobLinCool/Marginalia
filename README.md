@@ -6,7 +6,7 @@ Analyze what a paper is actually trying to answer, what it claims, and where tho
 
 ## What it does
 
-Submit an arXiv id or URL → Marginalia downloads the PDF, extracts the text, and asks an LLM to:
+Submit an arXiv id, DOI, or supported paper URL → Marginalia resolves paper metadata, downloads the PDF, extracts the text, and asks an LLM to:
 
 - Infer the paper's real research questions, not just copy what the abstract says
 - List each author claim with `claim_type`, `made_by_authors`, supporting evidence quotes
@@ -19,11 +19,11 @@ Results have stable, shareable permalinks at `/papers/:id/view` with Open Graph 
 
 Single Cloudflare Worker:
 
-- **D1** stores `papers` and `extraction_runs`. No separate text blob — only an sha256 of the extracted text is kept
+- **D1** stores `papers` and `extraction_runs`. No separate D1 text blob is kept; `extraction_runs.text_sha256` fingerprints the extracted text. The Workflow step state may retain the extracted text for the lifetime/retention window of the Workflow instance.
 - **Workflows** run the 5-step per-paper extraction (`mark-running → fetch-metadata → extract-text → call-llm → save-result`) with step-level retries
 - **OpenAI Responses API** with strict JSON schema produces the structured output
 - **Web UI** is three inline HTML pages (no static-assets binding) served by the same Worker
-- **Idempotency**: a partial unique index `(arxiv_id, model, prompt, schema) WHERE status IN ('queued','running')` + `INSERT ... ON CONFLICT DO NOTHING` guarantees one in-flight run per paper even under concurrent submits
+- **Idempotency**: a partial unique index `(canonical_id, model, prompt, schema) WHERE status IN ('queued','running')` + `INSERT ... ON CONFLICT DO NOTHING` guarantees one in-flight run per paper even under concurrent submits
 
 ## HTTP surface
 
@@ -68,7 +68,7 @@ Workflows requires a **Workers Paid** plan.
 
 ## Roadmap
 
-Roughly in priority order. Engineering notes for each in [`spec.md` §7](./spec.md#7-future-work).
+Roughly in priority order. Engineering notes for each in [`SPEC.md` §7](./SPEC.md#7-future-work).
 
 - **Daily arXiv discovery** — Cron-triggered Worker that queues every new `cs.*` submission through the same idempotent submit path
 - **Evaluation set** — ~100-paper hand-graded benchmark across `cs.AI` / `CL` / `CV` / `LG` / `RO` / `SE` / `DB` / `CR` / `HC` / `NE`, scoring `rq_specificity`, `claim_recall`, `claim_precision`, `support_judgment_quality`, `overclaim_detection`, `evidence_usefulness`
@@ -85,7 +85,7 @@ Roughly in priority order. Engineering notes for each in [`spec.md` §7](./spec.
 ```
 .
 ├── README.md                # this file
-├── spec.md                  # design doc
+├── SPEC.md                  # design doc
 └── worker/                  # the entire deployable app
     ├── src/                 # TypeScript source
     ├── migrations/          # D1 SQL migrations

@@ -1,4 +1,3 @@
-import { normalizeArxivId } from "./arxiv";
 import {
   DEFAULT_MODEL,
   DEFAULT_REASONING_EFFORT,
@@ -6,6 +5,10 @@ import {
   SCHEMA_VERSION,
 } from "./config";
 import type { Env } from "./env";
+import type { PaperRef } from "./paper";
+import { parsePaperRef } from "./paperRef";
+import { resolvePaperMetadata } from "./resolvers";
+import { PaperResolveError } from "./resolvers/errors";
 import {
   createRun,
   findLatestRun,
@@ -13,6 +16,7 @@ import {
   getPaperSummary,
   listPapersWithLatestSuccess,
   type RunRow,
+  upsertPaper,
 } from "./storage";
 import { indexHtml, listHtml, viewHtml } from "./ui";
 
@@ -47,24 +51,25 @@ export default {
     // /papers/:id/view — HTML detail page (skeleton; loads /papers/:id JSON).
     const viewMatch = path.match(/^\/papers\/(.+)\/view$/);
     if (viewMatch && req.method === "GET") {
-      const arxivId = normalizeArxivId(decodeURIComponent(viewMatch[1]));
-      if (!arxivId) return new Response("invalid arxiv id", { status: 400 });
+      const ref = parsePaperRef(decodeURIComponent(viewMatch[1]));
+      if (!ref) return new Response("invalid paper id", { status: 400 });
       // SSR the SEO/OG metadata so link previews show the real title +
       // summary. Falls back to a generic blurb when the paper hasn't been
       // analyzed yet.
       const summary = await getPaperSummary(
         env.DB,
-        arxivId,
+        ref.canonicalId,
         DEFAULT_MODEL,
         PROMPT_VERSION,
         SCHEMA_VERSION,
       );
       return html(
         viewHtml(
-          arxivId,
+          ref.canonicalId,
           {
             title: summary?.title ?? null,
             description: summary?.one_sentence_summary ?? null,
+            landingUrl: summary?.landing_url ?? null,
           },
           origin,
         ),
@@ -74,10 +79,10 @@ export default {
     // /papers/:id — JSON API. POST submits, GET polls.
     const paperMatch = path.match(/^\/papers\/(.+)$/);
     if (paperMatch) {
-      const arxivId = normalizeArxivId(decodeURIComponent(paperMatch[1]));
-      if (!arxivId) return json({ error: "invalid arxiv id" }, 400);
-      if (req.method === "POST") return await handleSubmit(env, arxivId);
-      if (req.method === "GET") return await handleGet(env, arxivId);
+      const ref = parsePaperRef(decodeURIComponent(paperMatch[1]));
+      if (!ref) return json({ error: "invalid paper id" }, 400);
+      if (req.method === "POST") return await handleSubmit(env, ref);
+      if (req.method === "GET") return await handleGet(env, ref.canonicalId);
       return json({ error: "method not allowed" }, 405);
     }
 
@@ -85,12 +90,12 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-async function handleSubmit(env: Env, arxivId: string): Promise<Response> {
+async function handleSubmit(env: Env, ref: PaperRef): Promise<Response> {
   const model = DEFAULT_MODEL;
 
   const success = await findLatestSuccess(
     env.DB,
-    arxivId,
+    ref.canonicalId,
     model,
     PROMPT_VERSION,
     SCHEMA_VERSION,
@@ -99,13 +104,34 @@ async function handleSubmit(env: Env, arxivId: string): Promise<Response> {
     return json(runToBody(success), 200);
   }
 
+  let metadata;
+  try {
+    metadata = await resolvePaperMetadata(ref);
+  } catch (err) {
+    if (err instanceof PaperResolveError) {
+      return json(
+        { error: err.message, canonicalId: ref.canonicalId },
+        err.status,
+      );
+    }
+    const e = err as Error;
+    return json(
+      {
+        error: e.message ?? "paper metadata resolution failed",
+        canonicalId: ref.canonicalId,
+      },
+      502,
+    );
+  }
+  await upsertPaper(env.DB, metadata);
+
   // Try to claim the in-flight slot. If two POSTs race, only the one that
   // wins the partial unique index insert proceeds to start a workflow; the
   // loser re-queries and reports the winner's run id.
   const runId = crypto.randomUUID();
   const inserted = await createRun(env.DB, {
     id: runId,
-    arxivId,
+    canonicalId: ref.canonicalId,
     model,
     promptVersion: PROMPT_VERSION,
     schemaVersion: SCHEMA_VERSION,
@@ -113,7 +139,7 @@ async function handleSubmit(env: Env, arxivId: string): Promise<Response> {
   if (!inserted) {
     const existing = await findLatestRun(
       env.DB,
-      arxivId,
+      ref.canonicalId,
       model,
       PROMPT_VERSION,
       SCHEMA_VERSION,
@@ -127,19 +153,19 @@ async function handleSubmit(env: Env, arxivId: string): Promise<Response> {
   await env.EXTRACT_WORKFLOW.create({
     id: runId,
     params: {
-      arxivId,
+      canonicalId: ref.canonicalId,
       model,
       reasoningEffort: DEFAULT_REASONING_EFFORT,
     },
   });
-  return json({ status: "queued", runId }, 202);
+  return json({ status: "queued", runId, canonicalId: ref.canonicalId }, 202);
 }
 
-async function handleGet(env: Env, arxivId: string): Promise<Response> {
+async function handleGet(env: Env, canonicalId: string): Promise<Response> {
   const model = DEFAULT_MODEL;
   const success = await findLatestSuccess(
     env.DB,
-    arxivId,
+    canonicalId,
     model,
     PROMPT_VERSION,
     SCHEMA_VERSION,
@@ -148,20 +174,21 @@ async function handleGet(env: Env, arxivId: string): Promise<Response> {
 
   const latest = await findLatestRun(
     env.DB,
-    arxivId,
+    canonicalId,
     model,
     PROMPT_VERSION,
     SCHEMA_VERSION,
   );
   if (latest) return json(runToBody(latest), 200);
 
-  return json({ status: "not_found", arxivId }, 404);
+  return json({ status: "not_found", canonicalId }, 404);
 }
 
 function runToBody(run: RunRow): Record<string, unknown> {
   const body: Record<string, unknown> = {
     status: run.status,
     runId: run.id,
+    canonicalId: run.canonical_id,
   };
   if (run.status === "success" && run.result) {
     body.result = JSON.parse(run.result);

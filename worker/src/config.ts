@@ -6,7 +6,7 @@ export const DEFAULT_REASONING_EFFORT = "medium";
 export const DEFAULT_MAX_INPUT_CHARS = 160_000;
 
 export const USER_AGENT =
-  "arxiv-rq-claims-worker/0.1 (mailto:jacoblincool@gmail.com)";
+  "marginalia-worker/0.1 (mailto:jacoblincool@gmail.com)";
 
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 export type RunStatus = "queued" | "running" | "success" | "failed";

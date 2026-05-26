@@ -4,24 +4,26 @@ import {
   type WorkflowStep,
 } from "cloudflare:workers";
 
-import { fetchArxivMetadata, type ArxivMetadata } from "../arxiv";
 import {
   DEFAULT_MAX_INPUT_CHARS,
   type ReasoningEffort,
 } from "../config";
 import type { Env } from "../env";
 import { callOpenAI, type LLMUsage } from "../extractor";
+import type { PaperMetadata } from "../paper";
+import { parsePaperRef } from "../paperRef";
 import {
   downloadAndExtractText,
   sha256Hex,
   stripReferences,
   truncateText,
 } from "../pdfText";
+import { resolvePaperMetadata } from "../resolvers";
 import type { ExtractionResult } from "../schemas";
-import { updateRun, upsertPaper } from "../storage";
+import { getPaperMetadata, updateRun, upsertPaper } from "../storage";
 
 export interface ExtractParams {
-  arxivId: string;
+  canonicalId: string;
   model: string;
   reasoningEffort: ReasoningEffort;
   maxInputChars?: number;
@@ -51,7 +53,7 @@ export class ExtractPaperWorkflow extends WorkflowEntrypoint<Env, ExtractParams>
     step: WorkflowStep,
   ): Promise<void> {
     const {
-      arxivId,
+      canonicalId,
       model,
       reasoningEffort,
       maxInputChars = DEFAULT_MAX_INPUT_CHARS,
@@ -65,26 +67,38 @@ export class ExtractPaperWorkflow extends WorkflowEntrypoint<Env, ExtractParams>
       });
 
       const metadataJson = await step.do("fetch-metadata", async () => {
-        const m = await fetchArxivMetadata(arxivId);
-        await upsertPaper(this.env.DB, m);
+        let m = await getPaperMetadata(this.env.DB, canonicalId);
+        if (!m) {
+          const ref = parsePaperRef(canonicalId);
+          if (!ref) throw new Error(`Invalid paper id: ${canonicalId}`);
+          m = await resolvePaperMetadata(ref);
+          await upsertPaper(this.env.DB, m);
+        }
         return JSON.stringify(m);
       });
-      const metadata = JSON.parse(metadataJson) as ArxivMetadata;
+      const metadata = JSON.parse(metadataJson) as PaperMetadata;
 
-      const extractedJson = await step.do("extract-text", async () => {
-        const raw = await downloadAndExtractText(metadata.pdfUrl);
-        let text = raw.text;
-        if (!keepReferences) text = stripReferences(text);
-        text = truncateText(text, maxInputChars);
-        const sha = await sha256Hex(text);
-        await updateRun(this.env.DB, runId, { text_sha256: sha });
-        const out: ExtractedText = {
-          paperText: text,
-          pageCount: raw.pageCount,
-          sha256: sha,
-        };
-        return JSON.stringify(out);
-      });
+      const extractedJson = await step.do(
+        "extract-text",
+        { retries: { limit: 0, delay: "1 second" } },
+        async () => {
+          if (!metadata.pdfUrl) {
+            throw new Error(`No PDF URL available for ${metadata.canonicalId}`);
+          }
+          const raw = await downloadAndExtractText(metadata.pdfUrl);
+          let text = raw.text;
+          if (!keepReferences) text = stripReferences(text);
+          text = truncateText(text, maxInputChars);
+          const sha = await sha256Hex(text);
+          await updateRun(this.env.DB, runId, { text_sha256: sha });
+          const out: ExtractedText = {
+            paperText: text,
+            pageCount: raw.pageCount,
+            sha256: sha,
+          };
+          return JSON.stringify(out);
+        },
+      );
       const extracted = JSON.parse(extractedJson) as ExtractedText;
 
       const llmJson = await step.do(

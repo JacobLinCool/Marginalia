@@ -33,7 +33,8 @@ const SHARED_CSS = `
   .item { border-left: 3px solid #e4e4e7; padding: .25rem 0 .25rem .75rem;
           margin: .5rem 0; }
   .badge { display: inline-block; padding: .1rem .5rem; border-radius: 4px;
-           background: #e4e4e7; font-size: .75rem; margin-right: .25rem; }
+           background: #e4e4e7; font-size: .75rem; margin-right: .25rem;
+           margin-bottom: .25rem; }
   .row { padding: .75rem 0; border-bottom: 1px solid #f4f4f5; }
   .row:last-child { border-bottom: 0; }
   .row a.title { font-weight: 600; }
@@ -141,7 +142,7 @@ interface PageMeta {
   title: string;
   /** Plain text, used in meta description, og:description, twitter:description. */
   description: string;
-  /** Absolute path on this origin (e.g. "/papers/2605.06136/view"). */
+  /** Absolute path on this origin (e.g. "/papers/arxiv%3A2605.06136/view"). */
   path: string;
   origin: string;
   /** Defaults to "website". Use "article" for per-paper pages. */
@@ -202,11 +203,11 @@ export function indexHtml(origin: string): string {
     },
     `<h1>Marginalia</h1>
 <p class="meta">
-  Enter an arXiv id or URL (e.g. <code>2605.06136</code>) to analyze the
+  Enter an arXiv id, DOI, or paper URL to analyze the
   paper's research questions, claims, and overclaim risk.
 </p>
 <form id="f">
-  <input type="text" id="arxivId" placeholder="2605.06136 or https://arxiv.org/abs/..." required>
+  <input type="text" id="paperInput" placeholder="2605.06136, 10.1145/3772318.3791958, or paper URL" required>
   <p><button id="submit" type="submit">Analyze</button></p>
 </form>
 <div id="status"></div>
@@ -214,7 +215,7 @@ export function indexHtml(origin: string): string {
     `
 const f = document.getElementById('f');
 const submitBtn = document.getElementById('submit');
-const input = document.getElementById('arxivId');
+const input = document.getElementById('paperInput');
 const statusEl = document.getElementById('status');
 const resultEl = document.getElementById('result');
 let pollTimer = null;
@@ -231,7 +232,9 @@ f.addEventListener('submit', async (e) => {
   try {
     const r = await fetch('/papers/' + encodeURIComponent(id), { method: 'POST' });
     const body = await r.json();
-    handle(id, body);
+    if (body.canonicalId) currentId = body.canonicalId;
+    if (!r.ok && !body.status) body.status = 'failed';
+    handle(currentId, body);
   } catch (err) {
     setStatus('failed', 'Error: ' + err.message);
     setBusy(false);
@@ -256,6 +259,11 @@ function setStatus(kind, msg) {
 
 function handle(id, body) {
   if (id !== currentId) return;
+  if (body.error && !body.status) {
+    setStatus('failed', 'Failed: ' + body.error);
+    setBusy(false);
+    return;
+  }
   if (body.status === 'success' || body.status === 'done') {
     window.location.href = '/papers/' + encodeURIComponent(id) + '/view';
     return;
@@ -294,7 +302,7 @@ export function listHtml(origin: string): string {
     {
       title: "Browse — Marginalia",
       description:
-        "All arXiv papers analyzed on this site, newest first. Click a paper to view its analyzed research questions, claims, and overclaim assessment.",
+        "All papers analyzed on this site, newest first. Click a paper to view its analyzed research questions, claims, and overclaim assessment.",
       path: "/papers",
       origin,
     },
@@ -315,12 +323,12 @@ const listEl = document.getElementById('list');
     for (const p of body.papers) {
       const row = document.createElement('div');
       row.className = 'row';
-      const href = '/papers/' + encodeURIComponent(p.arxiv_id) + '/view';
+      const href = '/papers/' + encodeURIComponent(p.canonical_id) + '/view';
       row.innerHTML =
-        '<p><a class="title" href="' + href + '">' + escape(p.title || p.arxiv_id) + '</a></p>' +
+        '<p><a class="title" href="' + href + '">' + escape(p.title || p.canonical_id) + '</a></p>' +
         (p.one_sentence_summary ? '<p>' + escape(p.one_sentence_summary) + '</p>' : '') +
         '<p class="meta">' +
-          '<span class="badge">' + escape(p.arxiv_id) + '</span>' +
+          '<span class="badge">' + escape(p.canonical_id) + '</span>' +
           (p.primary_category ? '<span class="badge">' + escape(p.primary_category) + '</span>' : '') +
           '<span class="badge">latency ' + (p.latency_ms ?? '?') + 'ms</span>' +
           '<span class="badge">' + escape(p.finished_at || '') + '</span>' +
@@ -336,36 +344,41 @@ const listEl = document.getElementById('list');
 }
 
 export interface ViewMeta {
-  /** Paper title, if known. Falls back to "arXiv {id}". */
+  /** Paper title, if known. Falls back to the canonical id. */
   title: string | null;
   /** One-sentence summary, if a successful extraction exists. */
   description: string | null;
+  /** Source landing page, if known. */
+  landingUrl: string | null;
 }
 
 export function viewHtml(
-  arxivId: string,
+  canonicalId: string,
   meta: ViewMeta,
   origin: string,
 ): string {
-  const safeId = arxivId.replace(/[<>"&]/g, "");
-  const seoTitle = `${meta.title ?? `arXiv ${safeId}`} — ${SITE_NAME}`;
+  const safeId = canonicalId.replace(/[<>"&]/g, "");
+  const seoTitle = `${meta.title ?? safeId} — ${SITE_NAME}`;
   const seoDescription =
     meta.description ??
-    `Analyzed research questions, claims, and overclaim risk for arXiv:${safeId}.`;
+    `Analyzed research questions, claims, and overclaim risk for ${safeId}.`;
+  const sourceLink = meta.landingUrl
+    ? `<a href="${escapeAttr(meta.landingUrl)}" target="_blank" rel="noreferrer">Source page</a>`
+    : "";
   return page(
     {
       title: seoTitle,
       description: seoDescription,
-      path: `/papers/${encodeURIComponent(arxivId)}/view`,
+      path: `/papers/${encodeURIComponent(canonicalId)}/view`,
       origin,
       ogType: "article",
     },
     `<h1>${escapeAttr(meta.title ?? safeId)}</h1>
-<p class="meta"><a href="https://arxiv.org/abs/${safeId}" target="_blank" rel="noreferrer">arXiv abstract page</a></p>
+<p class="meta"><span class="badge">${escapeAttr(safeId)}</span> ${sourceLink}</p>
 <div id="status"></div>
 <div id="result"></div>`,
     `
-const arxivId = ${JSON.stringify(arxivId)};
+const canonicalId = ${JSON.stringify(canonicalId)};
 const statusEl = document.getElementById('status');
 const resultEl = document.getElementById('result');
 let pollTimer = null;
@@ -382,7 +395,7 @@ function clear() {
 
 async function load() {
   try {
-    const r = await fetch('/papers/' + encodeURIComponent(arxivId));
+    const r = await fetch('/papers/' + encodeURIComponent(canonicalId));
     const body = await r.json();
     handle(body);
   } catch (err) {
@@ -403,7 +416,7 @@ function handle(body) {
   }
   if (body.status === 'not_found') {
     setStatus('not_found',
-      'Not yet analyzed. Go to /, submit ' + arxivId + ', then come back.');
+      'Not yet analyzed. Go to /, submit ' + canonicalId + ', then come back.');
     return;
   }
   setStatus(body.status, body.status + '...');

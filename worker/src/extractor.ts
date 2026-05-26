@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 
-import type { ArxivMetadata } from "./arxiv";
 import type { ReasoningEffort } from "./config";
+import type { PaperMetadata } from "./paper";
 import { SYSTEM_PROMPT, buildUserPrompt } from "./prompts";
 import {
   EXTRACTION_SCHEMA,
@@ -20,7 +20,7 @@ export async function callOpenAI(opts: {
   apiKey: string;
   model: string;
   reasoningEffort: ReasoningEffort;
-  metadata: ArxivMetadata;
+  metadata: PaperMetadata;
   paperText: string;
 }): Promise<LLMCallResult> {
   const client = new OpenAI({ apiKey: opts.apiKey });

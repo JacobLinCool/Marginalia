@@ -2,28 +2,10 @@ import { XMLParser } from "fast-xml-parser";
 
 import { USER_AGENT } from "./config";
 import { fetchWithRetry } from "./httpRetry";
-
-export interface ArxivMetadata {
-  arxivId: string;
-  arxivVersion: string | null;
-  title: string;
-  abstract: string;
-  authors: string[];
-  categories: string[];
-  primaryCategory: string | null;
-  published: string | null;
-  updated: string | null;
-  pdfUrl: string;
-}
+import type { PaperMetadata, PaperRef } from "./paper";
+import { PaperResolveError } from "./resolvers/errors";
 
 const ARXIV_API_URL = "https://export.arxiv.org/api/query";
-
-export function normalizeArxivId(value: string): string {
-  let v = value.trim();
-  v = v.replace(/^https?:\/\/arxiv\.org\/(abs|pdf)\//, "");
-  v = v.replace(/\.pdf$/, "");
-  return v;
-}
 
 export function splitArxivIdVersion(id: string): [string, string | null] {
   const m = id.match(/^(.*?)(v\d+)$/);
@@ -72,11 +54,14 @@ interface AtomEntry {
   "arxiv:primary_category"?: { "@_term"?: string };
 }
 
-function entryToMetadata(entry: AtomEntry, fallbackId: string): ArxivMetadata {
+function entryToMetadata(
+  entry: AtomEntry,
+  ref: PaperRef,
+): PaperMetadata {
   const rawId = entry.id ?? "";
   const idWithVersion = rawId.includes("/abs/")
     ? rawId.split("/abs/").pop()!
-    : fallbackId;
+    : ref.sourceId;
   const [baseId, version] = splitArxivIdVersion(idWithVersion);
 
   const links = asArray(entry.link);
@@ -88,29 +73,41 @@ function entryToMetadata(entry: AtomEntry, fallbackId: string): ArxivMetadata {
     }
   }
   if (!pdfUrl) pdfUrl = `https://arxiv.org/pdf/${baseId}`;
+  const categories = asArray(entry.category)
+    .map((c) => c["@_term"] ?? "")
+    .filter(Boolean);
 
   return {
-    arxivId: baseId,
-    arxivVersion: version,
+    canonicalId: ref.canonicalId,
+    source: "arxiv",
+    sourceId: ref.sourceId,
+    doi: null,
     title: squashWhitespace(entry.title ?? ""),
     abstract: squashWhitespace(entry.summary ?? ""),
     authors: asArray(entry.author)
       .map((a) => squashWhitespace(a.name ?? ""))
       .filter(Boolean),
-    categories: asArray(entry.category)
-      .map((c) => c["@_term"] ?? "")
-      .filter(Boolean),
+    categories,
     primaryCategory: entry["arxiv:primary_category"]?.["@_term"] ?? null,
+    venue: "arXiv",
     published: entry.published ?? null,
     updated: entry.updated ?? null,
+    landingUrl: `https://arxiv.org/abs/${baseId}`,
     pdfUrl,
+    license: null,
+    rawMetadata: {
+      provider: "arxiv",
+      arxivId: baseId,
+      arxivVersion: version,
+      idWithVersion,
+      categories,
+    },
   };
 }
 
-export async function fetchArxivMetadata(arxivId: string): Promise<ArxivMetadata> {
-  const [baseId] = splitArxivIdVersion(arxivId);
+export async function fetchArxivMetadata(ref: PaperRef): Promise<PaperMetadata> {
   const url = new URL(ARXIV_API_URL);
-  url.searchParams.set("id_list", arxivId);
+  url.searchParams.set("id_list", ref.sourceId);
 
   const res = await fetchWithRetry(
     url,
@@ -118,16 +115,24 @@ export async function fetchArxivMetadata(arxivId: string): Promise<ArxivMetadata
     { label: "arxiv metadata", maxAttempts: 10 },
   );
   if (!res.ok) {
-    throw new Error(`arXiv API ${res.status}: ${await res.text()}`);
+    throw new PaperResolveError(
+      `arXiv API ${res.status}: ${await res.text()}`,
+      502,
+    );
   }
   const xml = await res.text();
   const parsed = xmlParser.parse(xml);
   const feed = parsed?.feed;
-  if (!feed) throw new Error("arXiv API response missing <feed>");
+  if (!feed) {
+    throw new PaperResolveError("arXiv API response missing <feed>", 502);
+  }
 
   const entries = asArray<AtomEntry>(feed.entry);
   if (entries.length === 0) {
-    throw new Error(`No arXiv entry found for id=${arxivId}`);
+    throw new PaperResolveError(
+      `No arXiv entry found for id=${ref.sourceId}`,
+      404,
+    );
   }
-  return entryToMetadata(entries[0], baseId);
+  return entryToMetadata(entries[0], ref);
 }
