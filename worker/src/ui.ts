@@ -147,6 +147,9 @@ interface PageMeta {
   origin: string;
   /** Defaults to "website". Use "article" for per-paper pages. */
   ogType?: "website" | "article";
+  /** Absolute path on this origin. When present, upgrades Twitter cards. */
+  imagePath?: string;
+  imageAlt?: string;
 }
 
 function escapeAttr(s: string): string {
@@ -166,6 +169,8 @@ function page(meta: PageMeta, body: string, extraScript = ""): string {
   const url = escapeAttr(meta.origin + meta.path);
   const site = escapeAttr(SITE_NAME);
   const ogType = meta.ogType ?? "website";
+  const imageUrl = meta.imagePath ? escapeAttr(meta.origin + meta.imagePath) : null;
+  const imageAlt = escapeAttr(meta.imageAlt ?? meta.title);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -179,9 +184,15 @@ function page(meta: PageMeta, body: string, extraScript = ""): string {
 <meta property="og:title" content="${title}">
 <meta property="og:description" content="${description}">
 <meta property="og:url" content="${url}">
-<meta name="twitter:card" content="summary">
+${imageUrl ? `<meta property="og:image" content="${imageUrl}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="${imageAlt}">` : ""}
+<meta name="twitter:card" content="${imageUrl ? "summary_large_image" : "summary"}">
 <meta name="twitter:title" content="${title}">
 <meta name="twitter:description" content="${description}">
+${imageUrl ? `<meta name="twitter:image" content="${imageUrl}">
+<meta name="twitter:image:alt" content="${imageAlt}">` : ""}
 <style>${SHARED_CSS}</style>
 </head>
 <body>
@@ -372,6 +383,8 @@ export function viewHtml(
       path: `/papers/${encodeURIComponent(canonicalId)}/view`,
       origin,
       ogType: "article",
+      imagePath: `/papers/${encodeURIComponent(canonicalId)}/og.png`,
+      imageAlt: meta.title ?? safeId,
     },
     `<h1>${escapeAttr(meta.title ?? safeId)}</h1>
 <p class="meta"><span class="badge">${escapeAttr(safeId)}</span> ${sourceLink}</p>

@@ -5,6 +5,7 @@ import {
   SCHEMA_VERSION,
 } from "./config";
 import type { Env } from "./env";
+import { ogImageResponse } from "./ogImage";
 import type { PaperRef } from "./paper";
 import { parsePaperRef } from "./paperRef";
 import { resolvePaperMetadata } from "./resolvers";
@@ -46,6 +47,25 @@ export default {
         limit,
       );
       return json({ papers });
+    }
+
+    const ogMatch = path.match(/^\/papers\/(.+)\/og\.png$/);
+    if (ogMatch && req.method === "GET") {
+      const ref = parsePaperRef(decodeURIComponent(ogMatch[1]));
+      if (!ref) return new Response("invalid paper id", { status: 400 });
+      const summary = await getPaperSummary(
+        env.DB,
+        ref.canonicalId,
+        DEFAULT_MODEL,
+        PROMPT_VERSION,
+        SCHEMA_VERSION,
+      );
+      return ogImageResponse({
+        canonicalId: ref.canonicalId,
+        title: summary?.title ?? null,
+        summary: summary?.one_sentence_summary ?? null,
+        primaryCategory: summary?.primary_category ?? null,
+      });
     }
 
     // /papers/:id/view — HTML detail page (skeleton; loads /papers/:id JSON).

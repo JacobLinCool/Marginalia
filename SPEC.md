@@ -41,7 +41,6 @@ The MVP excludes:
 * Leaderboard fact-checking
 * Multi-model ensemble
 * Human annotation UI
-* Per-paper OG image
 
 ---
 
@@ -62,14 +61,16 @@ The MVP excludes:
 | GET    | `/`                | Submit form (HTML)                                  |
 | GET    | `/papers`          | List page (HTML)                                    |
 | GET    | `/api/papers`      | List JSON (`?limit=`, capped at 100)                |
+| GET    | `/papers/:id/og.png` | Per-paper Open Graph image                        |
 | GET    | `/papers/:id/view` | Per-paper HTML with SSR OG / Twitter meta           |
 | POST   | `/papers/:id`      | Submit (cache hit / claim slot / start workflow)    |
 | GET    | `/papers/:id`      | Poll status / fetch result                          |
 
 ### 2.3 SEO
 
-* All three pages emit `<title>`, `description`, `<link rel="canonical">`, `og:type`, `og:title`, `og:description`, `og:url`, `og:site_name`, `twitter:card=summary`, `twitter:title`, and `twitter:description`
+* All three pages emit `<title>`, `description`, `<link rel="canonical">`, `og:type`, `og:title`, `og:description`, `og:url`, `og:site_name`, `twitter:card`, `twitter:title`, and `twitter:description`
 * On `/papers/:id/view`, title and description are SSR'd from D1: title is `paper.title`, and description is the LLM's `one_sentence_summary`; pending papers use a generic blurb
+* Per-paper view pages include a Takumi-rendered `/papers/:id/og.png` image and use `twitter:card=summary_large_image`
 * `og:url` and canonical derive from `new URL(req.url).origin`, so custom domains work with the same code
 
 ---
@@ -81,6 +82,7 @@ The system has one HTTP Worker and one per-paper Workflow. The Worker serves HTM
 ```text
 Browser
   ├─ GET /, /papers, /papers/:id/view ──► Worker (HTML, SSR SEO meta)
+  ├─ GET /papers/:id/og.png ────────────► Worker ──► D1 ──► Takumi PNG
   ├─ GET /api/papers ───────────────────► Worker ──► D1
   ├─ POST /papers/:id ──────────────────► Worker ──► D1 (cache hit check)
   │                                           ├─ hit  → return result
@@ -109,6 +111,7 @@ worker/
     resolvers/                 # resolver dispatch + DOI/Crossref support
     pdfText.ts                 # unpdf extract + clean + strip refs + truncate + sha256
     httpRetry.ts               # fetchWithRetry (backoff + Retry-After)
+    ogImage.ts                  # Takumi-rendered per-paper OG image
     prompts.ts                 # SYSTEM_PROMPT + buildUserPrompt
     schemas.ts                 # EXTRACTION_SCHEMA (for OpenAI strict mode)
     extractor.ts               # callOpenAI (Responses API)
@@ -305,22 +308,18 @@ Hand-score 100 papers across cs.AI / CL / CV / LG / RO / SE / DB / CR / HC / NE:
 
 1–5 rubric: bad → weak → acceptable → good (distinguishes claims from evidence) → excellent (reconstructs the real agenda and flags overclaim).
 
-### 7.3 Per-paper OG image
-
-Use `satori` to SSR a per-paper card (title + summary + badge), upgrading `twitter:card` from `summary` to `summary_large_image`.
-
-### 7.4 Re-extraction backfill
+### 7.3 Re-extraction backfill
 
 Today, a version bump triggers re-extraction when a user re-submits. A backfill Workflow over pending `canonical_id` values could re-run the entire corpus after prompt, schema, or model changes.
 
-### 7.5 PDF figure / table understanding
+### 7.4 PDF figure / table understanding
 
 A separate Workflow could run a vision-capable model on pages referenced in evidence quotes and augment the result with figure / table content, expanding beyond the current text-only scope.
 
-### 7.6 Citation graph
+### 7.5 Citation graph
 
 Integrate OpenAlex / Semantic Scholar to flag tensions or contradictions between a paper's claims and its cited prior work.
 
-### 7.7 Human annotation UI
+### 7.6 Human annotation UI
 
 Add an overlay on the view page so reviewers can mark each `rq` / `claim` as correct / wrong / partial. Results land in a `human_reviews` table, producing a labeled set for fine-tuning.

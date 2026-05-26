@@ -22,7 +22,7 @@ Single Cloudflare Worker:
 - **D1** stores `papers` and `extraction_runs`. No separate D1 text blob is kept; `extraction_runs.text_sha256` fingerprints the extracted text. The Workflow step state may retain the extracted text for the lifetime/retention window of the Workflow instance.
 - **Workflows** run the 5-step per-paper extraction (`mark-running → fetch-metadata → extract-text → call-llm → save-result`) with step-level retries
 - **OpenAI Responses API** with strict JSON schema produces the structured output
-- **Web UI** is three inline HTML pages (no static-assets binding) served by the same Worker
+- **Web UI** is three inline HTML pages (no static-assets binding) served by the same Worker; Takumi renders per-paper Open Graph PNGs on demand
 - **Idempotency**: a partial unique index `(canonical_id, model, prompt, schema) WHERE status IN ('queued','running')` + `INSERT ... ON CONFLICT DO NOTHING` guarantees one in-flight run per paper even under concurrent submits
 
 ## HTTP surface
@@ -32,6 +32,7 @@ Single Cloudflare Worker:
 | GET    | `/`                 | Submit form                                      |
 | GET    | `/papers`           | List page                                        |
 | GET    | `/api/papers`       | List JSON (`?limit=`, capped at 100)             |
+| GET    | `/papers/:id/og.png` | Per-paper Open Graph image                      |
 | GET    | `/papers/:id/view`  | Per-paper page (server-rendered SEO meta)        |
 | POST   | `/papers/:id`       | Submit (cache hit, claim slot, or start workflow) |
 | GET    | `/papers/:id`       | Poll status / fetch result                       |
@@ -72,7 +73,6 @@ Roughly in priority order. Engineering notes for each in [`SPEC.md` §7](./SPEC.
 
 - **Daily arXiv discovery** — Cron-triggered Worker that queues every new `cs.*` submission through the same idempotent submit path
 - **Evaluation set** — ~100-paper hand-graded benchmark across `cs.AI` / `CL` / `CV` / `LG` / `RO` / `SE` / `DB` / `CR` / `HC` / `NE`, scoring `rq_specificity`, `claim_recall`, `claim_precision`, `support_judgment_quality`, `overclaim_detection`, `evidence_usefulness`
-- **Per-paper OG image** — `satori`-rendered card so link previews show the paper title and one-sentence summary instead of plain text
 - **Re-extraction backfill** — when `PROMPT_VERSION` / `SCHEMA_VERSION` / `DEFAULT_MODEL` bumps, batch re-run the corpus instead of waiting for users to re-submit
 - **PDF figure / table understanding** — separate Workflow that runs a vision-capable model on pages referenced in evidence quotes (escapes the current text-only scope)
 - **Citation graph** — pull OpenAlex / Semantic Scholar to flag where a claim contradicts cited prior work
