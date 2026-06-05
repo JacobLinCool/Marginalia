@@ -67,6 +67,33 @@ pnpm deploy
 
 Workflows requires a **Workers Paid** plan.
 
+### Ingesting paywalled papers (e.g. Nature)
+
+The Workflow downloads the PDF from inside the Worker. For paywalled publishers
+like Nature (`nature.com`, DOI prefix `10.1038`), the **deployed** Worker fails:
+from Cloudflare datacenter egress the `.../articles/<slug>.pdf` URL returns the
+HTML paywall page (`Not a PDF: content-type=text/html`), while the same URL
+serves a real PDF from a residential IP.
+
+Workaround — run the Worker **locally** (fetch egresses from your machine) but
+point the D1 binding at **production**, then submit the paper to localhost:
+
+```bash
+cd worker
+# In wrangler.toml, temporarily add `remote = true` to the [[d1_databases]] block.
+# The key is `remote`, NOT `experimental_remote`. Needs wrangler >= 4.98
+# (the pinned 4.94 doesn't support graduated remote bindings):
+pnpm dlx wrangler@latest dev          # NOT --remote: that runs the Worker on the edge and re-breaks the fetch
+# .dev.vars must hold OPENAI_API_KEY for the local LLM step.
+
+# In another shell — DB binding will report `remote`, so the result lands in prod D1:
+curl -X POST "http://localhost:8787/papers/https%3A%2F%2Fwww.nature.com%2Farticles%2Fs41586-025-09196-4"
+# poll until status: success, then confirm via the live worker:
+curl "https://marginalia.jacob.workers.dev/papers/https%3A%2F%2Fwww.nature.com%2Farticles%2Fs41586-025-09196-4"
+```
+
+Revert `remote = true` afterward, or every `pnpm dev` will write to prod D1.
+
 ## Roadmap
 
 Roughly in priority order. Engineering notes for each in [`SPEC.md` §7](./SPEC.md#7-future-work).
