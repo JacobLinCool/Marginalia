@@ -66,6 +66,11 @@ function parseUrlRef(url: URL, input: string): PaperRef | null {
     if (m) return doiRef(m[1], input);
   }
 
+  if (host === "nature.com" || host.endsWith(".nature.com")) {
+    const m = path.match(/^\/articles\/([^/]+?)(?:\.pdf)?$/i);
+    if (m) return doiRef(`10.1038/${m[1]}`, input);
+  }
+
   const doi = path.match(DOI_RE)?.[0];
   return doi ? doiRef(doi, input) : null;
 }
