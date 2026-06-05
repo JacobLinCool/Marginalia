@@ -67,13 +67,14 @@ pnpm deploy
 
 Workflows requires a **Workers Paid** plan.
 
-### Ingesting paywalled papers (e.g. Nature)
+### Ingesting paywalled papers (Nature, ACM, …)
 
-The Workflow downloads the PDF from inside the Worker. For paywalled publishers
-like Nature (`nature.com`, DOI prefix `10.1038`), the **deployed** Worker fails:
-from Cloudflare datacenter egress the `.../articles/<slug>.pdf` URL returns the
-HTML paywall page (`Not a PDF: content-type=text/html`), while the same URL
-serves a real PDF from a residential IP.
+The Workflow downloads the PDF from inside the Worker. Paywalled publishers
+— Nature (`nature.com`, DOI prefix `10.1038`), ACM (`dl.acm.org`), and others —
+make the **deployed** Worker fail: from Cloudflare datacenter egress the PDF URL
+returns an HTML paywall/login page (`Not a PDF: content-type=text/html`), while
+the same URL serves a real PDF from a residential IP. Open-access sources
+(arXiv, OA DOIs) are unaffected and work fine on the deployed Worker.
 
 Workaround — run the Worker **locally** (fetch egresses from your machine) but
 point the D1 binding at **production**, then submit the paper to localhost:
